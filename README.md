@@ -2,6 +2,8 @@
 
 Assess cargo bikes solution for urban logistics
 
-We are given a history of delivery orders performed by a large logistics operator in the Central Business Districtic of Singapore.
-Each order is described by destination latitute, destination longitude, shipment weight, service level, date. Such data is used as the base for a simulation analysis of cargo bike with mobile-depot solution for an urban logistics system.
+We are given a historical set of delivery orders performed by a large logistics operator in the Central Business Districtic of Singapore.
+Each order is described by destination latitute, destination longitude, shipment weight, service level, date. 
+
+We use this data ias the base for a simulation analysis to assess the use of cargo bikes to satisfy such demand for urban goods deliveries.
 
