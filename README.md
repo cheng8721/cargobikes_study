@@ -1,6 +1,4 @@
-# cargobikes_study
-
-Assess cargo bikes solution for urban logistics
+# Cargobikes study
 
 We are given a historical set of delivery orders performed by a large logistics operator in the Central Business Districtic of Singapore.
 Each order is described by destination latitute, destination longitude, shipment weight, service level, date. 
