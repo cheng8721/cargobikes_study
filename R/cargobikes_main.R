@@ -37,9 +37,9 @@ bike_tour_length <- 40000 #(in meters) max bike tour length is 50km, we assume 4
 hub_cut <- 2000 #(in meters) max dist allowed betwwen any 2 points within same hub cluster
 avg_bike_speed <- 250 #(meters/min) average bike speed
 bike_dwelltime_frac <- 0.6 #if ==1 then the dwell time bike == dwell time truck; if with bike the dwell time is reduced by 50%, then bike_dwelltime_frac <- 0.5
+avg_truck_speed <- 750 #(meters/min) average truck speed (==45 km/h)
+depot_loc <- c(103.967465, 1.331026) # (lon, lat) of depot
 mode <- "bike" #truck
-
-
 
 ### SCENARIOS
 nrep = 40 #no. of simulations for each scenario (==number of days simulated)
@@ -82,7 +82,7 @@ for (k in 1:nrow(scenarios)) {
     
     
     # compute day schedule
-    res <- day_scheduling(tmp, max_nboxes_hub, boxweight, bike_tour_length, hub_cut, avg_bike_speed)
+    res <- day_scheduling(tmp, max_nboxes_hub, boxweight, bike_tour_length, hub_cut, avg_bike_speed, depot_loc)
     
     res_hub <- rbind(res_hub, res$day_hub)
     res_tour_schedule <- rbind(res_tour_schedule, res$day_tour_schedule)

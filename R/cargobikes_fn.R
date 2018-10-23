@@ -68,12 +68,12 @@ bike_tsp <- function(tmp_tour, hub_centers) {
 
 
 
-day_scheduling <- function(tmp, max_nboxes_hub, boxweight, bike_tour_length, hub_cut, avg_bike_speed) {
-###return delivery orders for a day with hub and bike assignments-------------------------------------
-  #tmp              = single data data
-  #max_nboxes_hub   = max no. of boxes a hub can contain
-  #boxweight        = max weight a box can carry
-  #bike_tour_length = max length of single bike tour
+day_scheduling <- function(tmp, max_nboxes_hub, boxweight, bike_tour_length, hub_cut, avg_bike_speed, depot_loc) {
+###schedule delivery tours for bikes and assign them to hubs -------------------------------------
+  #tmp              = demand for single day
+  #max_nboxes_hub   = max no. of boxes carried by a hub
+  #boxweight        = max box weight
+  #bike_tour_length = max bike tour length
   #hub_cut          = 
   #avg_bike_speed   = average bike travel speed
 
@@ -104,15 +104,14 @@ day_scheduling <- function(tmp, max_nboxes_hub, boxweight, bike_tour_length, hub
     if (max(tmp_cut)<nrow(tmp)) tmp_cut <- cutree(hc, k=max(tmp_cut)+1) else break
   }
   
-  # compute hub refill trips
-  hub_centers$refill_trips <- NA
-  for (j in 1:max(tmp$hub)) {
-    hub_centers[hub_centers$hub==j,"refill_trips"] <- ceiling(length(unique(tmp[tmp$hub==j,"tourID"]))/max_nboxes_hub)
-  }
-  # hub_centers is an output
+  # compute hub refill trips and respective travel distance and time from depot
+  hub_centers$trips <- aggregate(tourID ~ hub, data=tmp, FUN= function(x) {return(ceiling(length(unique(x))/max_nboxes_hub))})[,2]
+  hub_centers$depot_dist <- apply(hub_centers[,c("lon", "lat")], MARGIN=1, FUN= function(x){distm(x, depot_loc)}) #meters
+  hub_centers$tot_travel_dist <- hub_centers$depot_dist*hub_centers$trips*2 #meters
+  hub_centers$tot_trave_time <- hub_centers$tot_travel_dist/avg_truck_speed #minutes
+ 
   
-  
-  ### TSP
+  # TSP
   day_tour_schedule <- data.frame()
   day_tour_stats <- data.frame()
   tmp$tourID <- as.character(tmp$tourID)
