@@ -22,21 +22,20 @@ generate_demand <- function(data, xweight, simulated, ndel, nrep) {
 
 
 
-bike_assignment <- function(cut, tmp_dat, boxweight, bike_tour_length, hub_centers) {
-  for (i in 1:max(cut)) {
-    if (all(is.na(tmp_dat[which(cut==i),"tourID"]))) { #cluster not yet assigned
-      if (sum(tmp_dat[which(cut==i),"weight"]) <= boxweight) { #tot cluster weight < bike capacity
-        if (nrow(tmp_dat[which(cut==i),])>1) tour_length <- bike_tsp(tmp_tour=tmp_dat[which(cut==i),], hub_centers)$tour_length else tour_length <- 0
-        if (tour_length <=  bike_tour_length) { #tot tour length < max allowed length
-          tour <<- tour +1
-          tmp_dat[which(cut==i),"tourID"] <- tour #assign bike
+bike_assignment <- function(tmp_cut, tmp, boxweight, bike_tour_length, hub_centers) {
+  for (k in 1:max(tmp_cut)) {
+    if (all(is.na(tmp[which(tmp_cut==k),"tourID"]))) { #cluster not yet assigned
+      if (sum(tmp[which(tmp_cut==k),"weight"]) <= boxweight) { #tot cluster weight < bike capacity
+        if (nrow(tmp[which(tmp_cut==k),])>1) tourlength <- bike_tsp(tmp_tour=tmp[which(tmp_cut==k),], hub_centers)$tour_length else tourlength <- 0
+        if (tourlength <=  bike_tour_length) { #tot tour length < max allowed length
+          tourID <- ifelse(all(is.na(tmp$tourID)), 1, max(tmp$tourID, na.rm=T)+1)
+          tmp[which(tmp_cut==k),"tourID"] <- tourID #assign bike
         }
-        
       }
     }
   }
-  return(tmp_dat$tourID)
-}
+  return(tmp$tourID)
+  }
 
 
 
@@ -59,34 +58,26 @@ bike_tsp <- function(tmp_tour, hub_centers) {
   atsp[HUB,] <- c(m[-hub,hub], 0)
   atsp[,HUB] <- c(m[hub,-hub], 0)
   
-  tour <- solve_TSP(atsp, method="nearest_insertion")
+  resTOUR <- solve_TSP(atsp, method="nearest_insertion")
   
-  return(list("path_labels"=c("hub", labels(cut_tour(tour, HUB)), "hub"), 
-              "tour_length"=tour_length(tour)))
+  return(list("path_labels"=c("hub", labels(cut_tour(resTOUR, HUB)), "hub"), 
+              "tour_length"=tour_length(resTOUR)))
   
 }
 
 
 
 
-day_scheduling <- function(tmp, max_nboxes_hub, boxweight, tot_load_share, bike_tour_length, hub_cut, avg_bike_speed) {
-##return delivery orders for a day with hub and bike assignments-------------------------------------
- #
- #
- #
- #
- #
- #
- #
- #
- #
- #
- #
- #
-  tour <- 0
-  tmp$hub <- tmp$tourID <- NA
+day_scheduling <- function(tmp, max_nboxes_hub, boxweight, bike_tour_length, hub_cut, avg_bike_speed) {
+###return delivery orders for a day with hub and bike assignments-------------------------------------
+  #tmp              = single data data
+  #max_nboxes_hub   = max no. of boxes a hub can contain
+  #boxweight        = max weight a box can carry
+  #bike_tour_length = max length of single bike tour
+  #hub_cut          = 
+  #avg_bike_speed   = average bike travel speed
 
-  day_res_tour <- data.frame()
+  tmp$hub <- NA
   
   #leaflet(data=tmp) %>% #plot all delivery points for a given day
   #  addProviderTiles("Stamen.TonerLite", options = providerTileOptions(noWrap = TRUE) ) %>%
@@ -97,7 +88,7 @@ day_scheduling <- function(tmp, max_nboxes_hub, boxweight, tot_load_share, bike_
   dmat <- distm(dmat)
   dmat <- as.dist(dmat) #in meters
   
-  # compute hierarchical clustering
+  # hierarchical clustering
   hc <- hclust(dmat, method="complete")
   
   # hub assignment
@@ -106,11 +97,11 @@ day_scheduling <- function(tmp, max_nboxes_hub, boxweight, tot_load_share, bike_
   hub_centers$date <- unique(tmp$date)
   
   # tour assignment
-  tmp$tourID <- bike_assignment(cut=tmp_cut, tmp_dat=tmp, boxweight, bike_tour_length, hub_centers) #initial bike assignment
+  tmp$tourID <- NA
   while (any(is.na(tmp$tourID))) {
+    tmp$tourID <- bike_assignment(tmp_cut, tmp, boxweight, bike_tour_length, hub_centers)
     tmp_cut <- cutree(hc, k=max(tmp_cut)+1)
     #print(max(tmp_cut))
-    tmp$tourID <- bike_assignment(cut=tmp_cut, tmp_dat=tmp, boxweight, bike_tour_length, hub_centers)
   }
   
   # compute hub refill trips
@@ -122,28 +113,34 @@ day_scheduling <- function(tmp, max_nboxes_hub, boxweight, tot_load_share, bike_
   
   
   ### TSP
+  day_tour_schedule <- data.frame()
+  day_tour_stats <- data.frame()
   tmp$tourID <- as.character(tmp$tourID)
-  tourID <- 0
-  day_res_tour <- data.frame()
   for (j in 1:length(unique(tmp$tourID))) {
     tmp_tour <- tmp[tmp$tourID==unique(tmp$tourID)[j],]
-    #if (nrow(tmp_tour)==1) path_labels <- c("hub", tmp_tour$nodeID, "hub") else {
-    #  path_labels <- bike_tsp(tmp_tour, hub_centers)$path_labels
-    #}
-    tour_tsp <- bike_tsp(tmp_tour, hub_centers)
+    if (nrow(tmp_tour)>1) tour_tsp <- bike_tsp(tmp_tour, hub_centers) else tour_tsp <- list("path_labels"=tmp_tour$nodeID, "tour_length"=0)
     
-    # print results
-    tourID <- tourID+1
-    res <- data.frame("nodeID"=tour_tsp$path_labels, "lat"=NA, "lon"=NA, "tourID"=tourID, "tourSEQ"=1:length(tour_tsp$path_labels), 
-                      "date"=unique(tmp_tour$date), "hub"=unique(tmp_tour$hub), "tour_travel_distance"=tour_tsp$tour_length,
-                      "tour_travel_time"=(tour_tsp$tour_length/avg_bike_speed), "tour_dwell_time"=sum(tmp_tour$dwell_time), "tour_no_express"=sum(tmp_tour$service_level!="Saver"), stringsAsFactors = F)
-    res[res$nodeID=="hub",c("lat", "lon")] <- hub_centers[hub_centers$hub==unique(tmp_tour$hub),c("lat", "lon")]
-    for (k in 1:nrow(res)) {
-      if (res[k,"nodeID"]=="hub") next else{
-        res[k,c("lat", "lon")] <- dat[dat$nodeID==res[k,"nodeID"],c("lat", "lon")]
-      }
-    }
-    day_res_tour <- rbind(day_res_tour, res)
+    # save results
+    tour_schedule <- data.frame("date"=unique(tmp_tour$date),
+                                "hubID"=unique(tmp_tour$hub),
+                                "tourID"=j,
+                                "nodeID"=tour_tsp$path_labels,
+                                "tourSEQ"=1:length(tour_tsp$path_labels), stringsAsFactors = F
+                                )
+    tour_stats <- data.frame("date"=unique(tmp_tour$date),
+                             "hubID"=unique(tmp_tour$hub),
+                             "tourID"=j,
+                             "tour_travel_distance"=tour_tsp$tour_length,
+                             "hub_travel_distance"=(nrow(hub_centers)+sum(hub_centers$refill_trips))*18000*2,
+                             "tour_travel_time"=(tour_tsp$tour_length/avg_bike_speed),
+                             "hub_travel_time"=(nrow(hub_centers)+sum(hub_centers$refill_trips))*20*2,
+                             "tour_dwell_time"=sum(tmp_tour$dwell_time),
+                             "tour_no_deliveries"=nrow(tmp_tour),
+                             "tour_no_express"=sum(tmp_tour$service_level!="Saver"), stringsAsFactors = F
+                             )
+    
+    day_tour_schedule <- rbind(day_tour_schedule, tour_schedule)
+    day_tour_stats <- rbind(day_tour_stats, tour_stats)
   }
   
   ### FLEET SIZE
@@ -151,7 +148,7 @@ day_scheduling <- function(tmp, max_nboxes_hub, boxweight, tot_load_share, bike_
   #summary_tours_day <- summary_tours_day[order(-summary_tours_day$tour_no_express),]
   #summary_tours_day$tot_tour_time <- summary_tours_day$tour_travel_time + summary_tours_day$tour_dwell_time
   
-  return("day_res_hub"=hub_centers, "day_res_tour"=day_res_tour)
+  return(list("day_hub"=hub_centers, "day_tour_schedule"=day_tour_schedule, "day_tour_stats"=day_tour_stats))
   
 }
 

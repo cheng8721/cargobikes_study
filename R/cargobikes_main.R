@@ -7,27 +7,23 @@ library(geosphere)
 library(dplyr)
 library(TSP)
 
-dir <- "~/cargo_bikes_study"
+dir <- "/Users/giacomodc/Dropbox/cargobikes_study"
 setwd(dir)
-source("cargobikes_fn.R")
+source(paste0(dir,"/R/cargobikes_fn.R"))
 
 
 ### LOAD
 raw <- read.csv("data/raw.csv", stringsAsFactors = F, header=T)
 names(raw) <- c("month", "weekend_date", "date", "pkg_barcode_num", "stop_start_time", "stop_end_time", "lat", "lon", "commercial_residential", "dispatch_loop_position_num", "stop_type", "consignee_address1","consignee_address2","consignee_address3", "consignee_postcode","service_level_code", "service_level", "weight", "delivery_info", "dwell_time")
-#raw <- read.csv("data/UPS_data_aggregated.csv", stringsAsFactors = F, header=T)
-#names(ups_dat) <- c("date", "lat", "lon", "weight", "package_count", "consignee_address1","consignee_address2","consignee_address3", "consignee_postcode", "departure_time")
 
 
 ### CLEAN
 raw$stop_start_time <- as.POSIXct(paste(raw$date, "00:00:00"), format = "%d/%m/%y %H:%M:%S") + 3600*raw$stop_start_time #needed only to compute dwell time
 raw$stop_end_time <- as.POSIXct(paste(raw$date, "00:00:00"), format = "%d/%m/%y %H:%M:%S") + 3600*raw$stop_end_time #needed only to compute dwell time
-raw$dwell_time <- raw$dwell_time*60 #convert hours into minutes
-#raw$dwell_time <- as.numeric(difftime(raw$stop_end_time, raw$stop_start_time, units="mins")) #CHANGE this --> use Rayden data
+raw$dwell_time <- raw$dwell_time*60 #convert hours to minutes
 raw$date <- as.Date(raw$date, format="%d/%m/%y")
 raw$weight <- round(raw$weight, 1)
 raw <- raw[raw$weight<180,] #suspect one outlier with weight==256.8 ...CHECK!
-#raw <- raw[raw$lat<=1.473965 & raw$lat>=1.237098 & raw$lon<=104.042086 & raw$lon>=103.605287,] #eliminate points outside singapore
 raw$nodeID <- 1:nrow(raw)
 raw$nodeID <- as.character(raw$nodeID)
 
@@ -37,37 +33,70 @@ max_nboxes_hub <- 9 #max number of boxes carried by hub
 max_boxweight <- 205 #180 kg in the box + 25 kg front bike
 tot_load_share <- 0.7 #70% of max filling
 boxweight <- max_boxweight*tot_load_share #max weight a bike-tour can carry
-bike_tour_length <- 40000 #(in meters) max tour length is 50km, we assume 40 km since we use euclidean distances 
+bike_tour_length <- 40000 #(in meters) max bike tour length is 50km, we assume 40 km since we use euclidean distances 
 hub_cut <- 2000 #(in meters) max dist allowed betwwen any 2 points within same hub cluster
-avg_bike_speed <- 400 #(meters/min) average bike speed
+avg_bike_speed <- 250 #(meters/min) average bike speed
 bike_dwelltime_frac <- 0.6 #if ==1 then the dwell time bike == dwell time truck; if with bike the dwell time is reduced by 50%, then bike_dwelltime_frac <- 0.5
+mode <- "bike" #truck
 
 
 
+### SCENARIOS
+nrep = 100 #no. of simulations for each scenario (==number of days simulated)
+vector_xweight = seq(from=0.5, to=4, by=0.25)
+vector_ndel = seq(from=100, to=700, by=50)
+scenarios <- data.frame("ndel"=rep(vector_ndel, each=length(vector_xweight)), "xweight"=vector_xweight)
 
+res_ALLscenarios_hub <- data.frame()
+res_ALLscenarios_tour_scehdule <- data.frame()
+res_ALLscenarios_tour_stats <- data.frame()
 
-
-### DEMAND GENERATION
-dat <- generate_demand(data=raw, xweight=1, simulated="Y", ndel=500, nrep=100) # original data contains 64 days, about 300 deliveries per day
-dat$dwell_time <- dat$dwell_time*bike_dwelltime_frac # FOR BIKES
-
-
-### SCHEDULING
-res_tour <- data.frame()
-res_hub <- data.frame()
-
-for (i in 1:length(unique(dat$date))) {
-  print(i)
+for (k in 1:nrow(scenarios)) {
+  print(k)
+  xweight <- scenarios[k,"xweight"]
+  ndel <- scenarios[k,"ndel"]
   
-  # select date
-  tmp <- dat[dat$date==unique(dat$date)[i],]
+  ### DEMAND GENERATION
+  dat <- generate_demand(data=raw, xweight=xweight, simulated="Y", ndel=ndel, nrep=nrep) # original data contains 64 days, ~300 deliveries per day
+  if (mode=="bike") dat$dwell_time <- dat$dwell_time*bike_dwelltime_frac
   
-  # compute day schedule
-  day_schedule <- day_scheduling(dat, max_nboxes_hub, boxweight, tot_load_share, bike_tour_length, hub_cut, avg_bike_speed)
-  res_hub <- rbind(res_hub, day_schedule$day_res_hub)
-  res_bike <- rbind(res_bike, day_schedule$day_res_bike)
+  ### SCHEDULING
+  res_hub <- data.frame()
+  res_tour_schedule <- data.frame()
+  res_tour_stats <- data.frame()
+  for (i in 1:length(unique(dat$date))) {
+    #print(i)
+    
+    # select day
+    tmp <- dat[dat$date==unique(dat$date)[i],]
+    
+    # compute day schedule
+    res <- day_scheduling(tmp, max_nboxes_hub, boxweight, bike_tour_length, hub_cut, avg_bike_speed)
+    
+    res_hub <- rbind(res_hub, res$day_hub)
+    res_tour_schedule <- rbind(res_tour_schedule, res$day_tour_schedule)
+    res_tour_stats <- rbind(res_tour_stats, res$day_tour_stats)
+  }
+  
+  res_hub$xweight <- xweight
+  res_hub$ndel <- ndel
+  res_tour_schedule$xweight <- xweight
+  res_tour_schedule$ndel <- ndel
+  res_tour_stats$xweight <- xweight
+  res_tour_stats$ndel <- ndel
+  
+  res_ALLscenarios_hub <- rbind(res_ALLscenarios_hub, res_hub)
+  res_ALLscenarios_tour_scehdule <- rbind(res_ALLscenarios_tour_scehdule, res_tour_schedule)
+  res_ALLscenarios_tour_stats <- rbind(res_ALLscenarios_tour_stats, res_tour_stats)
   
 }
+
+
+
+
+
+
+
 
 
 
