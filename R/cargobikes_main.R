@@ -42,9 +42,12 @@ mode <- "bike" #truck
 
 
 ### SCENARIOS
-nrep = 100 #no. of simulations for each scenario (==number of days simulated)
-vector_xweight = seq(from=0.5, to=4, by=0.25)
-vector_ndel = seq(from=100, to=700, by=50)
+nrep = 40 #no. of simulations for each scenario (==number of days simulated)
+#vector_xweight = seq(from=0.5, to=4, by=0.25)
+#vector_xweight = 1
+vector_xweight = seq(from=0.5, to=2, by=0.5)
+#vector_ndel = seq(from=50, to=1000, by=50)
+vector_ndel = seq(from=100, to=500, by=100)
 scenarios <- data.frame("ndel"=rep(vector_ndel, each=length(vector_xweight)), "xweight"=vector_xweight)
 
 res_ALLscenarios_hub <- data.frame()
@@ -70,6 +73,14 @@ for (k in 1:nrow(scenarios)) {
     # select day
     tmp <- dat[dat$date==unique(dat$date)[i],]
     
+    while (any(tmp$weight>boxweight)) { #if the weight of a single delivery exceed the capacity of a cargo bike, the deliverty point is split in 2
+      excess_weight <- tmp[tmp$weight>boxweight,"weight"][1] - boxweight #find excess weight
+      tmp[nrow(tmp)+1,] <- tmp[tmp$weight>boxweight,][1,] #add new delivery point
+      tmp[tmp$weight>boxweight,"weight"][1] <- boxweight #adjust original del point to max capacity
+      tmp[nrow(tmp),"weight"] <- excess_weight #adjust weight of new delivery point
+    }
+    
+    
     # compute day schedule
     res <- day_scheduling(tmp, max_nboxes_hub, boxweight, bike_tour_length, hub_cut, avg_bike_speed)
     
@@ -80,10 +91,13 @@ for (k in 1:nrow(scenarios)) {
   
   res_hub$xweight <- xweight
   res_hub$ndel <- ndel
+  res_hub$scenario <- k
   res_tour_schedule$xweight <- xweight
   res_tour_schedule$ndel <- ndel
+  res_tour_schedule$scenario <- k
   res_tour_stats$xweight <- xweight
   res_tour_stats$ndel <- ndel
+  res_tour_stats$scenario <- k
   
   res_ALLscenarios_hub <- rbind(res_ALLscenarios_hub, res_hub)
   res_ALLscenarios_tour_scehdule <- rbind(res_ALLscenarios_tour_scehdule, res_tour_schedule)
@@ -92,22 +106,16 @@ for (k in 1:nrow(scenarios)) {
 }
 
 
+### SAVE
 
+res_ALLscenarios_hub[,] <- lapply(res_ALLscenarios_hub[,], as.character)
+write.csv(res_ALLscenarios_hub, file="results/simulated/res_hub.csv", row.names =F)
 
+res_ALLscenarios_tour_scehdule[,] <- lapply(res_ALLscenarios_tour_scehdule[,], as.character)
+write.csv(res_ALLscenarios_tour_scehdule, file="results/simulated/res_tour.csv", row.names =F)
 
-
-
-
-
-
-
-
-
-
-
-
-
-
+res_ALLscenarios_tour_stats[,] <- lapply(res_ALLscenarios_tour_stats[,], as.character)
+write.csv(res_ALLscenarios_tour_stats, file="results/simulated/res_tourstats.csv", row.names =F)
 
 
 #map_orders <- leaflet(data=tmp) %>% #plot all delivery points for a given day
@@ -117,17 +125,6 @@ for (k in 1:nrow(scenarios)) {
 #  map_orders <- map_orders %>% addPolylines(lat = results_tours[results_tours$tourID==i,"lat"], lng = results_tours[results_tours$tourID==i,"lon"]) 
 #}
 #map_orders
-
-
-### SAVE
-results_tours[,] <- lapply(results_tours[,], as.character)
-write.csv(results_tours, file="RYTLEtours_bikes.csv", row.names =F)
-
-results_hubs[,] <- lapply(results_hubs[,], as.character)
-write.csv(results_hubs, file="RYTLEtours_hubs.csv", row.names =F)
-
-
-
 
 
 

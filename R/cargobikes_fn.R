@@ -100,14 +100,14 @@ day_scheduling <- function(tmp, max_nboxes_hub, boxweight, bike_tour_length, hub
   tmp$tourID <- NA
   while (any(is.na(tmp$tourID))) {
     tmp$tourID <- bike_assignment(tmp_cut, tmp, boxweight, bike_tour_length, hub_centers)
-    tmp_cut <- cutree(hc, k=max(tmp_cut)+1)
     #print(max(tmp_cut))
+    if (max(tmp_cut)<nrow(tmp)) tmp_cut <- cutree(hc, k=max(tmp_cut)+1) else break
   }
   
   # compute hub refill trips
   hub_centers$refill_trips <- NA
   for (j in 1:max(tmp$hub)) {
-    hub_centers[hub_centers$hub==j,"refill_trips"] <- ceiling(length(unique(tmp[tmp$hub==j,"bike"]))/max_nboxes_hub)
+    hub_centers[hub_centers$hub==j,"refill_trips"] <- ceiling(length(unique(tmp[tmp$hub==j,"tourID"]))/max_nboxes_hub)
   }
   # hub_centers is an output
   
