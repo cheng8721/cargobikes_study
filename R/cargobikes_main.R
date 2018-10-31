@@ -10,6 +10,7 @@ library(leaflet) # maps
 library(geosphere)
 library(dplyr)
 library(TSP)
+library(parallel)
 
 input_data <- "data/raw.csv"
 source(paste0(getwd(),"/R/cargobikes_fn.R"))
@@ -54,21 +55,18 @@ truck_max_tour_time <- 10*60 #minutes
 
 # demand scenarios
 nrep = 2 #no. of days to simulate (per each scenario)
-vector_xweight = seq(from=0.5, to=4, by=0.25)
-#vector_xweight = c(0.5,1)
-vector_ndel = seq(from=50, to=1000, by=50)
-#vector_ndel = c(100, 300)
+#vector_xweight = seq(from=0.5, to=4, by=0.25)
+#vector_ndel = seq(from=50, to=1000, by=50)
+vector_xweight = c(0.5,1, 1.5)
+vector_ndel = c(100, 300)
 scenarios <- data.frame("ndel"=rep(vector_ndel, each=length(vector_xweight)), "xweight"=vector_xweight)
 
 
+numCores <- detectCores()
+
 
 ### RUN
-res_ALLscenarios_bike <- list()
-res_ALLscenarios_truck <- list()
-
-for (k in 1:nrow(scenarios)) {
-  
-  print(k)
+sim_fun <- function(k) {
   
   # generate demand scenarios
   xweight <- scenarios[k,"xweight"]
@@ -86,7 +84,8 @@ for (k in 1:nrow(scenarios)) {
     
     # mode: bike
     tmp_adj <- adjust_demand(tmp, dwell_factor=bike_dwelltime, max_weight=boxweight) #adjust demand
-    res <- day_scheduling(tmp=tmp_adj, depot_loc=depot_loc, max_weight=boxweight, max_tour_length=bike_max_tour_length, max_tour_time=bike_max_tour_time, avg_speed=bike_avg_speed, hub="Y", max_nboxes_hub, hub_cut) #simulate bikes
+    res <- day_scheduling(tmp=tmp_adj, depot_loc=depot_loc, max_weight=boxweight, max_tour_length=bike_max_tour_length, 
+                          max_tour_time=bike_max_tour_time, avg_speed=bike_avg_speed, hub="Y", max_nboxes_hub, hub_cut) #simulate bikes
     res_bike$hub <- rbind(res_bike$hub, res$day_hub)
     res_bike$tour_schedule <- rbind(res_bike$tour_schedule, res$day_tour_schedule)
     res_bike$tour_stats <- rbind(res_bike$tour_stats, res$day_tour_stats)
@@ -108,15 +107,19 @@ for (k in 1:nrow(scenarios)) {
   res_truck <- mapply(cbind, res_truck, "scenario"=k, SIMPLIFY=F)
   
   # save results
-  res_ALLscenarios_bike[[k]] <- res_bike
-  res_ALLscenarios_truck[[k]] <- res_truck
+  return(list("res_bike"=res_bike, "res_truck"=res_truck))
 }
+
+
+system.time({
+  res_scenarios <- mclapply(1:nrow(scenarios), sim_fun, mc.cores = numCores)
+})
+
 
 
 
 ### SAVE
-save(res_ALLscenarios_bike, file="results/res_bike.RData")
-save(res_ALLscenarios_truck, file="results/res_truck.RData")
+save(res_scenarios, file=paste0("results/res_",Sys.Date(),".RData"))
 
 
 

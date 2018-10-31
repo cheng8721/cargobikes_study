@@ -176,7 +176,7 @@ day_scheduling <- function(tmp, depot_loc, max_weight, max_tour_length, max_tour
     hub_centers$trips <- aggregate(tourID ~ hubID, data=tmp, FUN= function(x) {return(ceiling(length(unique(x))/max_nboxes_hub))})[,2]
     hub_centers$depot_dist <- apply(hub_centers[,c("lon", "lat")], MARGIN=1, FUN= function(x){distm(x, depot_loc)}) #meters
     hub_centers$tot_travel_dist <- hub_centers$depot_dist*hub_centers$trips*2 #meters
-    hub_centers$tot_trave_time <- hub_centers$tot_travel_dist/750 #minutes (750 is the avg truck speed in meters/min --CHECK!)
+    hub_centers$tot_travel_time <- hub_centers$tot_travel_dist/750 #minutes (750 is the avg truck speed in meters/min --CHECK!)
     RESULTS[["day_hub"]] <- hub_centers
   }
   
