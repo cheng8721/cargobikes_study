@@ -10,29 +10,43 @@ library(leaflet) # maps
 library(geosphere)
 library(dplyr)
 library(TSP)
-library(parallel)
+library(parallel) #
+library(metaSEM) # vec2symMat()
 
-input_data <- "data/raw.csv"
+input_data <- "data/raw_merged.csv"
+input_distmatrix <- "data/dist_matrix.csv"
 source(paste0(getwd(),"/R/cargobikes_fn.R"))
 
 
 ### INPUT DATA
+# delivery orders
 raw <- read.csv(input_data, stringsAsFactors = F, header=T)
-names(raw) <- c("month", "weekend_date", "date", "pkg_barcode_num", "stop_start_time", "stop_end_time", "lat", "lon", "commercial_residential", 
-                "dispatch_loop_position_num", "stop_type", "consignee_address1","consignee_address2","consignee_address3", "consignee_postcode",
-                "service_level_code", "service_level", "weight", "delivery_info", "dwell_time")
-raw$stop_start_time <- as.POSIXct(paste(raw$date, "00:00:00"), format = "%d/%m/%y %H:%M:%S") + 3600*raw$stop_start_time #needed only to compute dwell time
-raw$stop_end_time <- as.POSIXct(paste(raw$date, "00:00:00"), format = "%d/%m/%y %H:%M:%S") + 3600*raw$stop_end_time #needed only to compute dwell time
+names(raw) <- c("UPS_tourID", "UPS_routeID", "date", "UPS_merge", "consignee_postcode", "start_time", "end_time", "lat", "lon", "weight", "n_del_merged", 
+                "consignee_address1","consignee_address2","consignee_address3", "service_level", "UPS_departure_time", "UPS_stopID", "UPS_stop_type",
+                "mapped_lat", "mapped_lon", "UPS_traveltime", "UPS_basetime", "UPS_traveldist", "new_start_time", "dwell_time", "weekday", "UPS_vehicle_type", 
+                "UPS_CO2emissions")
+raw <- raw[raw$UPS_stop_type=="end/start",] #eliminate extra rows added for depot stops at the start and end of tours
+raw <- raw[,-grep("^UPS", names(raw))] #eliminate columns used to re-compute UPS tours
+raw$start_time <- decimal_to_time(vtime=raw$start_time, date=raw$date)
+raw$end_time <- decimal_to_time(vtime=raw$end_time, date=raw$date)
 raw$dwell_time <- raw$dwell_time*60 #convert hours to minutes
-raw$date <- as.Date(raw$date, format="%d/%m/%y")
+raw$date <- as.Date(raw$date, format=date_format(raw$date))
 raw$weight <- round(raw$weight, 1)
 raw$nodeID <- as.character(1:nrow(raw))
+raw$consignee_postcode <- as.character(raw$consignee_postcode)
+raw[which(nchar(raw$consignee_postcode)==5),"consignee_postcode"] <- paste0("0", raw[which(nchar(raw$consignee_postcode)==5),"consignee_postcode"]) #if the postcode is 4-characters long, a "0" is added
+raw$new_start_time <- decimal_to_time(vtime=raw$new_start_time, date=raw$date)
+
+# distance matrix
+full_pdmat <- read.csv(input_distmatrix, stringsAsFactors = F, header=T, row.names = 1, check.names=F) # matrix of postcodes distances
+rownames(full_pdmat) <- colnames(full_pdmat)
+full_pdmat <- as.matrix(full_pdmat)
 
 
 
 ### INPUTS PARAMETERS
 # depot
-depot_loc <- data.frame("lon"=103.967465, "lat"=1.331026) # 22 Changi South Ave 2, UPS House Singapore, Singapore
+depot <- data.frame("lon"=103.967465, "lat"=1.331026, "postcode"="486064", "nodeID"="depot", stringsAsFactors = F) # 22 Changi South Ave 2, UPS House Singapore, Singapore
 
 # cargo bike
 max_boxweight <- 205 #180 kg in the box + 25 kg front bike
@@ -54,18 +68,20 @@ truck_max_tour_length <- 500*1000 #meters
 truck_max_tour_time <- 10*60 #minutes
 
 # demand scenarios
-nrep = 2 #no. of days to simulate (per each scenario)
-#vector_xweight = seq(from=0.5, to=4, by=0.25)
-#vector_ndel = seq(from=50, to=1000, by=50)
-vector_xweight = c(0.5,1, 1.5)
-vector_ndel = c(100, 300)
+nrep = 100 #no. of days to simulate (per each scenario)
+vector_xweight = seq(from=0.5, to=3, by=0.25)
+vector_ndel = seq(from=25, to=500, by=25)
+#nrep = 2
+#vector_xweight = c(0.5,1, 1.5)
+#vector_ndel = c(100, 300)
 scenarios <- data.frame("ndel"=rep(vector_ndel, each=length(vector_xweight)), "xweight"=vector_xweight)
 
 
-numCores <- detectCores()
 
 
 ### RUN
+numCores <- detectCores()
+
 sim_fun <- function(k) {
   
   # generate demand scenarios
@@ -81,10 +97,15 @@ sim_fun <- function(k) {
     
     # select day
     tmp <- dat[dat$date==unique(dat$date)[i],]
+    tmp <- tmp[order(tmp$consignee_postcode),] #order by postcode
+    
+    # postcodes distance matrix (asymmetric)
+    postcodes <- c(unique(tmp$consignee_postcode), depot$postcode)
+    pdmat <- full_pdmat[which(colnames(full_pdmat) %in% postcodes),which(colnames(full_pdmat) %in% postcodes)]
     
     # mode: bike
     tmp_adj <- adjust_demand(tmp, dwell_factor=bike_dwelltime, max_weight=boxweight) #adjust demand
-    res <- day_scheduling(tmp=tmp_adj, depot_loc=depot_loc, max_weight=boxweight, max_tour_length=bike_max_tour_length, 
+    res <- day_scheduling(tmp=tmp_adj, pdmat=pdmat, depot=depot, max_weight=boxweight, max_tour_length=bike_max_tour_length, 
                           max_tour_time=bike_max_tour_time, avg_speed=bike_avg_speed, hub="Y", max_nboxes_hub, hub_cut) #simulate bikes
     res_bike$hub <- rbind(res_bike$hub, res$day_hub)
     res_bike$tour_schedule <- rbind(res_bike$tour_schedule, res$day_tour_schedule)
@@ -92,7 +113,8 @@ sim_fun <- function(k) {
     
     # mode: truck
     tmp_adj <- adjust_demand(tmp, dwell_factor=1, max_weight=truck_max_weight)
-    res <- day_scheduling(tmp=tmp_adj, depot_loc=depot_loc, max_weight=truck_max_weight, max_tour_length=truck_max_tour_length, max_tour_time=truck_max_tour_time, avg_speed=truck_avg_speed, hub="N")
+    res <- day_scheduling(tmp=tmp_adj, pdmat=pdmat, depot=depot, max_weight=truck_max_weight, max_tour_length=truck_max_tour_length, 
+                          max_tour_time=truck_max_tour_time, avg_speed=truck_avg_speed, hub="N")
     res_truck$tour_schedule <- rbind(res_truck$tour_schedule, res$day_tour_schedule)
     res_truck$tour_stats <- rbind(res_truck$tour_stats, res$day_tour_stats)
     
@@ -122,5 +144,8 @@ system.time({
 save(res_scenarios, file=paste0("results/res_",Sys.Date(),".RData"))
 
 
-
+#names(raw) <- c("UPS_tourID","month", "weekend_date", "date", "pkg_barcode_num", "start_time", "end_time", "lat", "lon", "commercial_residential", 
+#                "dispatch_loop_position_num", "stop_type", "consignee_address1","consignee_address2","consignee_address3", "consignee_postcode",
+#                "service_level_code", "service_level", "weight", "delivery_info", "UPS_vehicle_type", "merge1", "merge2", "merge3", "UPS_traveldist", 
+#                "UPS_traveltime", "new_start_time", "dwell_time", "UPS_CO2emissions")
 
