@@ -1,28 +1,35 @@
 
-date_format <- function(date) ifelse(all(grepl("/", date)), "%d/%m/%Y", "%Y-%m-%d")
+datetime_format <- function(date) ifelse(all(grepl("/", date)), "%d/%m/%Y", "%Y-%m-%d")
 
 decimal_to_time <- function(vtime, date) {
-  format_date <- paste(date_format(date), "%H:%M:%S")
-  as.POSIXct(paste(date, "00:00:00"), format = format_date) + 3600*vtime
+  format <- paste(datetime_format(date), "%H:%M:%S")
+  as.POSIXct(paste(date, "00:00:00"), format = format) + 3600*vtime
 }
 
 
-generate_demand <- function(data, xweight, simulated, ndel, nrep) {
+
+
+generate_demand <- function(data, simulated=c("Y", "N"), xweight=NULL, ndel=NULL, nrep=NULL) {
   ##return set of deliveries for nrep number of days-------------------------------------
   #data      = set of deliveries from which to sample from
   #xweight   = multiplicative factor for weights (e.g. if ==2 then weight=weight*2)
   #simulated = if "N" then original data is returned, if "Y" simulated days are returned
   #ndel      = if simulated, number of delivery points per day (sampled from data)
   #nrep      = if simulated, number of days generated
-  ##
-  data$weight <- data$weight*xweight
-  if (simulated=="N") return(data) else {
-    sim_data <- data[replicate(nrep, sample(1:nrow(data), size=ndel, replace=F)),c("lat", "lon", "consignee_address1", "consignee_address3", "consignee_postcode", "service_level", "weight", "dwell_time", "nodeID")]
+  
+  if (simulated=="N") {
+    return(data[,c("date","lat", "lon", "consignee_address1", "consignee_address3", "postcode", "service_level", "weight", "dwell_time", "nodeID", "priority")])
+  } else {
+    data$weight <- data$weight*xweight
+    sim_data <- data[replicate(nrep, sample(1:nrow(data), size=ndel, replace=F)),c("lat", "lon", "consignee_address1", "consignee_address3", "postcode", "service_level", "weight", "dwell_time", "nodeID", "priority")]
     date <- rep(as.Date(as.Date("2010-9-06"):(as.Date("2010-9-06")+nrep-1), origin="1970-01-01"), each=ndel)
-    sim_data <- cbind(date, sim_data)
+    date <- as.character(date, stringsAsFactors = F)
+    sim_data <- cbind.data.frame(date, sim_data, stringsAsFactors = FALSE)
     return(sim_data)
   }
 }
+
+
 
 adjust_demand <- function(tmp, dwell_factor, max_weight) {
   ### adjust demand according to a given mode
@@ -48,60 +55,88 @@ adjust_demand <- function(tmp, dwell_factor, max_weight) {
 
 
 
-tour_assignment <- function(tmp_cut, tmp, pdmat, max_weight, max_tour_length, max_tour_time, start_tour, avg_speed, hub) {
-  stats <- data.frame()
-  schedule <- data.frame()
-  for (k in unique(tmp_cut[which(is.na(tmp$tourID))])) {
-    tmp_tour <- tmp[which(tmp_cut==k),]
-    if (sum(tmp_tour$weight) <= max_weight) { #tot cluster weight < weight capacity
-      
-      # select start of tour node (depot or hub) and add it to the candidate set of nodes
-      tmp_tour_withstart <- tmp_tour
-      if (hub=="N") {
-        start <- "depot"
-        tmp_tour_withstart[nrow(tmp_tour_withstart)+1,c("lat", "lon", "nodeID", "consignee_postcode")] <- start_tour[,c("lat", "lon", "nodeID", "postcode")]
-      } else {
-        start <- start_tour[start_tour$hubID==unique(tmp_tour$hubID),"nodeID"]
-        if (!(start %in% tmp_tour$nodeID)) tmp_tour_withstart <- rbind(tmp_tour_withstart, tmp[tmp$nodeID==start,])
-      }
-      
-      #compute tour distance matrix
-      dmat_tour <- distance_matrix(tmp=tmp_tour_withstart, pdmat, method = "googleAPI", symmetric = F)
-        
-      #compute tour length and time
-      tour <- solve_tsp(dm=dmat_tour, start)
-      tourlength <- tour$tour_length 
-      tourtraveltime <- tourlength/avg_speed 
-      tourdwelltime <- sum(tmp_tour$dwell_time)
-      tourtottime <- tourtraveltime + tourdwelltime
-
-      if (tourlength <=  max_tour_length & tourtottime <= max_tour_time) { #tot tour length <= max allowed length & tot tour time <= max allowed time
-        tourID <- ifelse(all(is.na(tmp$tourID)), 1, max(tmp$tourID, na.rm=T)+1)
-        tmp[which(tmp_cut==k),"tourID"] <- tourID #assign cluster to tour ID
-        tour_stats <- data.frame("hubID"=ifelse(hub=="N", NA, unique(tmp_tour$hubID)),
-                                 "tourID"=tourID,
-                                 "tour_travel_distance"=tourlength,
-                                 "tour_travel_time"=tourtraveltime,
-                                 "tour_dwell_time"=tourdwelltime,
-                                 "tour_tot_time"=tourtottime,
-                                 "tour_ndeliveries"=nrow(tmp_tour),
-                                 "tour_n_express"=sum(tmp_tour$service_level %in% c("Express", "Express Plus")),
-                                 "tour_tot_weight"=sum(tmp_tour$weight),
-                                 stringsAsFactors = F)
-        stats <- rbind(stats, tour_stats)
-        tour_schedule <- data.frame("hubID"=ifelse(hub=="N", NA, unique(tmp_tour$hubID)),
-                                    "tourID"=tourID,
-                                    "nodeID"=tour$path_labels,
-                                    "tourSEQ"=1:length(tour$path_labels), 
-                                    stringsAsFactors = F)
-        schedule <- rbind(schedule, tour_schedule)
-      }
-    }
-    }
-  return(list("assignment"=tmp$tourID, 
-              "schedule"=schedule,
-              "stats"=stats))
+tour_assignment <- function(tmp_cut, tmp, pdmat, max_weight, max_tour_length, max_tour_time, max_tour_time_express, start_tour, avg_speed, hub, dist_calculation_method, tour_stats, tour_schedule) {
+  
+  OLDtourID <- tmp$tourID
+  tmp$tourID <- tmp_cut #tmp need to be updated with the "proposed" tour assignment
+  tourID_list <- as.character(unique(tmp_cut[which(is.na(OLDtourID))]))
+  
+  ts <- find_feasible_tours(tourID_list, tmp, max_weight, max_tour_time, max_tour_time_express, max_tour_length, hub, start_tour, depot, dist_calculation_method, pdmat, avg_speed)
+  
+  if (is.null(ts)) return(list("assignment"=OLDtourID, "stats"=tour_stats, "schedule"=tour_schedule))
+  
+  # update tourID
+  startID <- ifelse(all(is.na(OLDtourID)), 1, max(OLDtourID, na.rm=T)+1)
+  tourID_map <- data.frame("oldID"=ts$tourID, "newID"=startID:(startID+nrow(ts)-1))
+  tmp[!(tmp$tourID %in% ts$tourID),"tourID"] <- NA #set to NA the tours that either were found feasible in previous iterations or that are not feasible
+  tmp$tourID <- sapply(1:length(tmp$tourID), function(x) if (!is.na(tmp[x,"tourID"])) tourID_map[tourID_map$oldID==tmp[x,"tourID"],"newID"] else NA ) #update the tourID according to tourID_map
+  tmp[which(!is.na(OLDtourID)),"tourID"] <- OLDtourID[!is.na(OLDtourID)]
+  
+  # update tour_stats
+  ts$tourID <- sapply(1:nrow(ts), function(x) tourID_map[tourID_map$oldID==ts[x,"tourID"],"newID"]) #update tourIDs in the new tour_stats
+  if (nrow(tour_stats)==0) tour_stats <- ts[,-which(names(ts)=="tour_labels")] else {
+    tour_stats <- rbind(tour_stats, ts[,names(tour_stats)]) #merge the old and new tour_stats
   }
+  
+  # update tour_schedule
+  new_tour_schedule <- data.frame()
+  for (x in 1:nrow(ts)) new_tour_schedule <- rbind(new_tour_schedule, data.frame("nodeID"=unlist(strsplit(ts[x,"tour_labels"], "_")), "hubID"=ts[x,"hubID"], "tourID"=ts[x,"tourID"], "tourSEQ"=1:length(unlist(strsplit(ts[x,"tour_labels"], "_"))), stringsAsFactors = F ))
+  if (nrow(tour_schedule)==0) tour_schedule <- new_tour_schedule else {
+    tour_schedule <- rbind(tour_schedule, new_tour_schedule[,names(tour_schedule)])
+  }
+  
+  return(list("assignment"=tmp$tourID, "stats"=tour_stats, "schedule"=tour_schedule))
+}
+
+
+
+
+
+find_feasible_tours <- function(tourID_list, tmp, max_weight, max_tour_time, max_tour_time_express, max_tour_length, hub, start_tour, depot, dist_calculation_method, pdmat, avg_speed) {
+  
+  ts <- data.frame("tourID"=tourID_list, stringsAsFactors = F) # initialize tour_stats
+  ts$tour_tot_weight <- sapply(1:nrow(ts), function(x) sum(tmp[tmp$tourID %in% as.numeric(unlist(strsplit(ts[x,"tourID"], "_"))),"weight"]))
+  ts$tour_dwell_time <- sapply(1:nrow(ts), function(x) sum(tmp[tmp$tourID %in% as.numeric(unlist(strsplit(ts[x,"tourID"], "_"))),"dwell_time"]))
+  ts$tour_ndeliveries <- sapply(1:nrow(ts), function(x) sum(tmp$tourID %in% as.numeric(unlist(strsplit(ts[x,"tourID"], "_")))))
+  ts$tour_n_express <- sapply(1:nrow(ts), function(x) sum(tmp[tmp$tourID %in% as.numeric(unlist(strsplit(ts[x,"tourID"], "_"))),"priority"]=="high"))
+  ts$hubID <- sapply(1:nrow(ts), function(x) unique(tmp[tmp$tourID %in% as.numeric(unlist(strsplit(ts[x,"tourID"], "_"))),"hubID"]))
+  ts$date <- unique(tmp$date)
+  
+  feasible_tours <- (ts[,"tour_tot_weight"]<=max_weight) & (ts[,"tour_dwell_time"]<=ifelse(ts[,"tour_n_express"]==0, max_tour_time, max_tour_time_express))
+  if (any(feasible_tours)) ts <- ts[feasible_tours,] else return(NULL)
+  
+  tsp_sol <- sapply(1:nrow(ts), function(x) {
+    
+    tmp_tour <- tmp[tmp$tourID %in% as.numeric(unlist(strsplit(ts[x,"tourID"], "_"))),]
+    
+    tmp_tour_withstart <- tmp_tour
+    if (hub=="N") {
+      start <- "depot"
+      tmp_tour_withstart[nrow(tmp_tour_withstart)+1,c("lat", "lon", "nodeID", "postcode")] <- start_tour[,c("lat", "lon", "nodeID", "postcode")]
+    } else {
+      start <- start_tour[start_tour$hubID==unique(tmp_tour$hubID),"nodeID"]
+      if (!(start %in% tmp_tour$nodeID)) tmp_tour_withstart <- rbind(tmp_tour_withstart, tmp[tmp$nodeID==start,])
+    }
+    
+    if (dist_calculation_method=="googleAPI") dmat_tour <- distance_matrix(tmp=tmp_tour_withstart, method = "googleAPI", pdmat=pdmat, symmetric = F, weight_priority=0)
+    if (dist_calculation_method=="euclidean") dmat_tour <- distance_matrix(tmp=tmp_tour_withstart, method = "euclidean", pdmat=pdmat, symmetric = F, weight_priority=0)
+    
+    tour <- solve_tsp(dm=dmat_tour, start)
+    tour_travel_distance <- tour$tour_length
+    tour_travel_time <- tour_travel_distance/avg_speed 
+    c(tour_travel_distance, tour_travel_time, paste(tour$path_labels, collapse="_"))
+  })
+  
+  ts[,c("tour_travel_distance", "tour_travel_time", "tour_labels")] <- t(tsp_sol)
+  ts[,c("tour_travel_distance", "tour_travel_time")] <- lapply(ts[,c("tour_travel_distance", "tour_travel_time")], as.numeric)
+  
+  ts$tour_tot_time <- ts$tour_dwell_time + as.numeric(ts$tour_travel_time)
+  
+  feasible_tours <- (ts[,"tour_tot_time"] <= ifelse(ts[,"tour_n_express"]==0, max_tour_time, max_tour_time_express) & ts[,"tour_travel_distance"] <= max_tour_length)
+  if (any(feasible_tours)) ts <- ts[feasible_tours,] else return(NULL)
+  
+  return(ts)
+}
 
 
 
@@ -120,7 +155,7 @@ solve_tsp <- function(dm, start) {
 
 
 
-distance_matrix <- function(tmp, method, pdmat=NULL, symmetric=NULL, fun=NULL) {
+distance_matrix <- function(tmp, method, pdmat=NULL, symmetric=NULL, fun=NULL, weight_priority=0) {
   #takes as main inputs the dataframe of delivery locations (tmp) and the distance matrix of postal codes (pdmat)
   #returns a matrix of distances between each pair of nodes
   #two methods are available:
@@ -130,16 +165,27 @@ distance_matrix <- function(tmp, method, pdmat=NULL, symmetric=NULL, fun=NULL) {
   #       - if symmetric is F then pdmat is not left as a asymmetric matrix, and the resulting distance matrix is also asymmetric
   
   if (!(method %in% c("euclidean", "googleAPI"))) stop("method must be 'euclidean' or 'googleAPI' ")
+  if (weight_priority<0 | weight_priority>1) stop("weight should be in [0,1]")
   
   if (method=="euclidean") dmat <- euclidean_dmat(tmp)
   
   if (method=="googleAPI") {
-    pdmat_tmp <- pdmat[unique(tmp$consignee_postcode), unique(tmp$consignee_postcode), drop=FALSE] # subset pdmat by keeping only postcodes present in tmp, drop=F force pdmat to mantain the matrix format, even if after subsetting it it is transformed into a singleton (in the case all nodes ahve same postcode)
+    pdmat_tmp <- pdmat[unique(tmp$postcode), unique(tmp$postcode), drop=FALSE] # subset pdmat by keeping only postcodes present in tmp, drop=F force pdmat to mantain the matrix format, even if after subsetting it it is transformed into a singleton (in the case all nodes ahve same postcode)
     if (symmetric) pdmat_tmp <- symmetric_dmat(dm=pdmat_tmp, fun=fun)
-    postcode_freq <- as.data.frame(table(tmp$consignee_postcode), stringsAsFactors = F) #frequencies of postcodes associated with the nodes in tmp
+    postcode_freq <- as.data.frame(table(tmp$postcode), stringsAsFactors = F) #frequencies of postcodes associated with the nodes in tmp
     names(postcode_freq) <- c("postcode", "freq")
     dmat <-pdmat_tmp[rep(postcode_freq$postcode, postcode_freq$freq), rep(postcode_freq$postcode, postcode_freq$freq), drop=FALSE] 
     rownames(dmat) <- colnames(dmat) <- tmp$nodeID
+    }
+  
+  if (weight_priority>0) {
+    #weighted (w) average between dmat and priority type matrix
+    scaled_dmat <- dmat/mean(dmat) #see pg.505 of book Hastie, Tibshirani and Friedman (2009)
+    prdmat <- as.matrix(daisy(data.frame(tmp$priority)))
+    if (all(prdmat==0)) scaled_prdmat <- prdmat else {#if all deliveries are of low or high priority, then the prdmat is a matrix of zeros, hence we cannot standardize it
+      scaled_prdmat <- prdmat/mean(prdmat)
+    } 
+    dmat <- (1-weight_priority)*scaled_dmat + (weight_priority)*scaled_prdmat
   }
   
   return(dmat)
@@ -178,90 +224,155 @@ symmetric_dmat <- function(dm, fun) {
 
 
 
-find_postcode <- function(tmp, hub_centers) {
+map_hub_to_node <- function(tmp, hub_centers) {
   #return the postcode of the closest node to each cluster center 
-  names(hub_centers)[1] <- "nodeID"
-  dm <- distance_matrix(tmp=rbind(tmp[,c("nodeID","lat","lon")], hub_centers), method="euclidean")
-  dm <- dm[(nrow(dm)-nrow(hub_centers)+1):nrow(dm),1:(nrow(dm)-nrow(hub_centers)), drop=F]
-  closest_nodeID <- sapply(1:nrow(dm), FUN=function(x) { #return the nodeID of the closest nodes which belong to the same cluster
-    row <- dm[x,,drop=F]
-    row <- row[,tmp[tmp$hubID==x,"nodeID"],drop=F]
-    colnames(row)[which.min(row)]
+  sol <- lapply(1:max(tmp$hubID), function (x) {
+    which_min_node <- which.min(distm(hub_centers[hub_centers$hubID==hub_centers$hubID[x],c("lon","lat")], tmp[tmp$hubID==hub_centers$hubID[x],c("lon","lat")]))
+    tmp[tmp$hubID==hub_centers$hubID[x],c("postcode", "nodeID", "hubID", "lon", "lat")][which_min_node,]
     })
-  postcodes <- tmp[tmp$nodeID %in% closest_nodeID,"consignee_postcode"]
-  return(data.frame("postcode"=postcodes, "nodeID"=closest_nodeID, stringsAsFactors = F))
+  sol <- do.call(rbind, sol)
+  names(sol)[which(names(sol)=="postcode")] <- "postcode"
+  return(sol)
   }
 
 
 
-
-
-
-day_scheduling <- function(tmp, pdmat, depot, max_weight, max_tour_length, max_tour_time, avg_speed, hub, max_nboxes_hub, hub_cut) {
-  ###schedule delivery tours for bikes and assign them to hubs 
-  #tmp              = demand for single day
-  #depot_loc
-  #max_weight
-  #max_tour_length
-  #avg_speed
-  #hub
-  #max_nboxes_hub
-  #hub_cut
-  ###-------------------------------------
-
-  RESULTS <- list()
-  
-  # distance matrix
-  dmat <- distance_matrix(tmp=tmp, pdmat=pdmat, method="googleAPI", symmetric=T, fun="min") 
-    ##CHECK: somehow hclust works also with asymmetric dmat. Why????? read: https://www.datacamp.com/community/tutorials/hierarchical-clustering-R
-
-  # hierarchical clustering
-  hc <- hclust(as.dist(dmat), method="complete")
-  
-  # hub assignment
-  if (hub=="Y") {
-    tmp$hubID <- tmp_cut <- cutree(hc, h=hub_cut)
-    hub_centers <- merge(aggregate(lat ~ hubID, data = tmp, FUN = mean), aggregate(lon ~ hubID, data = tmp, FUN = mean))
-    hub_centers[,c("postcode", "nodeID")] <- find_postcode(tmp, hub_centers)[,c("postcode", "nodeID")]
-    start_tour <- hub_centers
-  } else {
-    tmp_cut <- rep(1, nrow(tmp))
-    start_tour <- depot
+solve_knapsack <- function(vehicles, p, w) {
+  k <- vehicles$cap
+  if (length(w)==1) { # if there is only one tour, then we assign it to the vehicle with the lowest capacity
+    tmp_vehicles <- vehicles[vehicles$cap>=w,]
+    chosen_vehicles <- tmp_vehicles[which.min(tmp_vehicles$cap),"vehicleID"]
+    vehicles[vehicles$vehicleID==chosen_vehicles,"cap"] <- vehicles[vehicles$vehicleID==chosen_vehicles,"cap"]-w
+  } else { 
+    if (any(k>=sum(w))) {# if all tours can be performed by one single vehicle then these are assigned to that vehicle. If more than one vehicle is suitable, then all tours are assigned to the vehicle which (1) can contain them all and (2) has minimum capacity
+      tmp_vehicles <- vehicles[vehicles$cap>=sum(w),]
+      chosen_vehicles <- tmp_vehicles[which.min(tmp_vehicles$cap),"vehicleID"]
+      vehicles[vehicles$vehicleID==chosen_vehicles,"cap"] <- vehicles[vehicles$vehicleID==chosen_vehicles,"cap"]-sum(w)
+    } else {
+      tmp_vehicles <- vehicles[vehicles$cap>min(w),] # keep only the vehicles which can be used
+      sol <- mknapsack(p, w, k=tmp_vehicles$cap)
+      chosen_vehicles <- tmp_vehicles[sol$ksack,"vehicleID"]
+      tmp <- data.frame("tour_tot_time"=w, "vehicleID"=chosen_vehicles)
+      #tmp_tours_express$vehicleID <- chosen_vehicles
+      agg <- aggregate(tour_tot_time ~ vehicleID,  data=tmp, FUN=sum)
+      vehicles[1:nrow(agg),"cap"] <- vehicles[1:nrow(agg),"cap"]-agg$tour_tot_time
+    }
   }
+  vehicles$cap <- round(vehicles$cap) #make sure capacities are integer
+  vehicles <- vehicles[order(vehicles$cap),]#sort vehicle table by cap
   
-  # tour assignment
-  tmp$tourID <- NA
-  tour_schedule <- data.frame()
-  tour_stats <- data.frame()
-  while (any(is.na(tmp$tourID))) {
-    tour <- tour_assignment(tmp_cut, tmp, pdmat, max_weight, max_tour_length, max_tour_time, start_tour, avg_speed, hub)
-    tmp$tourID <- tour$assignment
-    tour_schedule <- rbind(tour_schedule, tour$schedule)
-    tour_stats <- rbind(tour_stats, tour$stats)
-    #print(max(tmp_cut))
-    if (max(tmp_cut)<nrow(tmp)) tmp_cut <- cutree(hc, k=max(tmp_cut)+1) else break
-  }
-  tour_schedule$date <- tour_stats$date <- unique(tmp$date)
+  return(list("chosen_vehicles"=chosen_vehicles, "vehicles"=vehicles))
+} 
+
+
+
+
+
+
+vehicle_assignment <- function(tours, start_time, express_time, max_tour_time) {
+  tours$tourID <- as.character(tours$tourID)
+  tours$vehicleID <- NA
   
-  # vehicle assignment
-  #tmp$vehicleID <- NA
-  
-  # hub trips
-  if (hub=="Y") {
-    hub_centers$date <- unique(tmp$date)
+  for (h in 1:max(tours$hubID)) {
+    tmp_tours <- tours[tours$hubID==h,]
+    vehicles <- data.frame("vehicleID"=1:nrow(tmp_tours), "cap"=NA)
+    vehicles$cap <- as.integer(difftime(express_time, start_time, units = "mins"))
     
-    # compute hub refill trips and respective travel distance and time from depot
-    hub_centers$trips <- aggregate(tourID ~ hubID, data=tmp, FUN= function(x) {return(ceiling(length(unique(x))/max_nboxes_hub))})[,2]
-    hub_centers$depot_dist <- sapply(hub_centers$postcode, FUN= function(x){pdmat[depot$postcode , x] + pdmat[x , depot$postcode]}) #meters
-    hub_centers$tot_travel_dist <- hub_centers$depot_dist*hub_centers$trips #meters
-    hub_centers$tot_travel_time <- hub_centers$tot_travel_dist/750 #minutes (750 is the avg truck speed in meters/min --CHECK!)
-    RESULTS[["day_hub"]] <- hub_centers
+    # express deliveries
+    if (any(tmp_tours$tour_n_express>0)) {
+      tmp_tours_express <- tmp_tours[tmp_tours$tour_n_express>0,]
+      p <- tmp_tours_express$tour_n_express
+      w <- round(tmp_tours_express$tour_tot_time)
+      if (any(w==0)) w[w==0] <- 1 #if one tour time is rounded to 0, then we set it at 1 (w must be a vector of positive integers)
+      sol_knapsack <- solve_knapsack(vehicles, p, w)
+      vehicles <- sol_knapsack$vehicles
+      tours[tours$hubID==h & tours$tour_n_express>0,"vehicleID"] <- sol_knapsack$chosen_vehicles
+    }
+    
+    # non-express deliveries
+    if (any(tmp_tours$tour_n_express==0)) {
+      tmp_tours_nonexpress <- tmp_tours[tmp_tours$tour_n_express==0,]
+      vehicles$cap <- vehicles$cap + max_tour_time - as.numeric(difftime(express_time, start_time, units = "mins")) #add afternoon time
+      p <- rep(1, nrow(tmp_tours_nonexpress))
+      w <- round(tmp_tours_nonexpress$tour_tot_time)
+      if (any(w==0)) w[w==0] <- 1 
+      sol_knapsack <- solve_knapsack(vehicles, p, w)
+      vehicles <- sol_knapsack$vehicles
+      tours[tours$hubID==h & tours$tour_n_express==0,"vehicleID"] <- sol_knapsack$chosen_vehicles
+    }
+  }
+  tours$vehicleID
+}
+
+
+
+
+
+tour_merge <- function(tour_stats, tour_schedule, tmp, max_weight, max_tour_time, max_tour_time_express, max_tour_length, hub, start_tour, depot, dist_calculation_method, pdmat, avg_speed) {
+  
+  if (nrow(tour_stats)==1) return(NULL)
+  combinations <- data.frame(t(combn(tour_stats$tourID, 2))) 
+  
+  # only combinations which tours belong to same hubID are allowed
+  same_hubID <- tour_stats[combinations[,1],"hubID"] == tour_stats[combinations[,2],"hubID"] 
+  if (any(same_hubID)) combinations <- combinations[same_hubID,] else return(NULL)
+  
+  tourID_list <- as.character(paste(combinations[,1], combinations[,2], sep="_"))
+  cts <- find_feasible_tours(tourID_list, tmp, max_weight, max_tour_time, max_tour_time_express, max_tour_length, hub, start_tour, depot, dist_calculation_method, pdmat, avg_speed)
+  
+  if (is.null(cts)) return(NULL) 
+  
+  cts$SUM_tour_tot_time <- sapply(1:nrow(cts), function(x) sum(tour_stats[tour_stats$tourID %in% as.numeric(unlist(strsplit(cts[x,"tourID"], "_"))),"tour_tot_time"])) ##SUM of the tour times!! not merged yet
+  cts$SUM_tour_travel_distance <- sapply(1:nrow(cts), function(x) sum(as.numeric(tour_stats[tour_stats$tourID %in% as.numeric(unlist(strsplit(cts[x,"tourID"], "_"))),"tour_travel_distance"]))) ##SUM of the tour times!! not merged yet
+  
+  feasible_tours <- (cts[,"SUM_tour_travel_distance"] >= cts[,"tour_travel_distance"]) & (cts[,"SUM_tour_tot_time"] >= cts[,"tour_tot_time"])
+  if (any(feasible_tours)) cts <- cts[feasible_tours,] else return(NULL)
+  
+  G1 <- igraph::graph(as.numeric(unlist(strsplit(cts$tourID, "_"))), directed = FALSE)
+  #weights <- cts$SUM_tour_travel_distance - cts$tour_travel_distance #add weight to the bipartite graph
+  #igraph::E(G1)$weight <- weights
+  sol <- maxmatching(G1, weighted = FALSE)
+  #sol <- maxmatching(G1, weighted =TRUE)
+  
+  if ("mate" %in% names(sol)) { ####### check from here!
+    sol <- sol$matching
+    matches <- sapply(1:nrow(t(matrix(sol, nrow = 2))), function(x) paste(t(matrix(sol, nrow = 2))[x,], collapse="_"))
+    selected_tours <- cts$tourID %in%  matches
+  } else {
+    sol <- sol$matching
+    selected_tours <- sapply(1:nrow(cts), function(x) {
+      k <- sol[as.numeric(unlist(strsplit(cts[x,"tourID"], "_")))[1]]
+      if (!is.na(k) & k==as.numeric(unlist(strsplit(cts[x,"tourID"], "_")))[2]) T else F
+    })
   }
   
-  RESULTS[["day_tour_schedule"]] <- tour_schedule
-  RESULTS[["day_tour_stats"]] <- tour_stats
+  if (any(selected_tours)) cts <- cts[selected_tours,] else return(NULL)
   
-  return(RESULTS)
+  # update tour_stats
+  tour_stats <- rbind(tour_stats[!(tour_stats$tourID %in% as.numeric(unlist(strsplit(cts$tourID, "_")))),], cts[,names(tour_stats)]) 
+  tourID_map <- data.frame("oldID"=tour_stats$tourID, "newID"=1:nrow(tour_stats), stringsAsFactors = F)
+  tour_stats$tourID <- tourID_map$newID
+  
+  # update tour_schedule
+  new_tour_schedule <- data.frame()
+  for (x in 1:nrow(cts)) new_tour_schedule <- rbind(new_tour_schedule, data.frame("nodeID"=unlist(strsplit(cts[x,"tour_labels"], "_")), "hubID"=cts[x,"hubID"], "tourID"=cts[x,"tourID"], "tourSEQ"=1:length(unlist(strsplit(cts[x,"tour_labels"], "_")))))
+  tour_schedule <- rbind(tour_schedule[!(tour_schedule$tourID %in% as.numeric(unlist(strsplit(cts$tourID, "_")))),], new_tour_schedule)
+  tour_schedule$tourID <- sapply(1:nrow(tour_schedule), function(x) {
+    ind <- grep(paste0("^",as.character(tour_schedule[x,"tourID"]), "$"), tourID_map$oldID)
+    if (length(ind)==0) ind <- grep(paste0("^",as.character(tour_schedule[x,"tourID"]), "_"), tourID_map$oldID)
+    if (length(ind)==0) ind <- grep(paste0("_",as.character(tour_schedule[x,"tourID"]), "$"), tourID_map$oldID)
+    tourID_map[ind,"newID"]
+  })
+  
+  # update tourID
+  tmp$tourID <- sapply(1:nrow(tmp), function(x) {
+    ind <- grep(paste0("^",as.character(tmp[x,"tourID"]), "$"), tourID_map$oldID)
+    if (length(ind)==0) ind <- grep(paste0("^",as.character(tmp[x,"tourID"]), "_"), tourID_map$oldID)
+    if (length(ind)==0) ind <- grep(paste0("_",as.character(tmp[x,"tourID"]), "$"), tourID_map$oldID)
+    tourID_map[ind,"newID"]
+  })
+  
+  return(list("assignment"=tmp$tourID, "stats"=tour_stats, "schedule"=tour_schedule))
 }
 
 
@@ -272,27 +383,98 @@ day_scheduling <- function(tmp, pdmat, depot, max_weight, max_tour_length, max_t
 
 
 
+day_scheduling <- function(tmp, pdmat, depot, max_weight, max_tour_length, max_tour_time, express_time, start_time, avg_speed, hub, max_nboxes_hub, n_hubs, weight_priority, dist_calculation_method=c("googleAPI", "euclidean")) {
+  ###schedule delivery tours for bikes and assign them to hubs 
+  ###-------------------------------------
 
-
-
-
-
-#library(ggmap)
-#tmp$consignee_postcode <- paste0("0", tmp$consignee_postcode)
-#tmp$address <- paste(tmp$consignee_postcode, "Singapore")
-#for (i in 1:nrow(tmp)) {
-#  geocode(tmp$address[i])
-#}
+  RESULTS <- list()
   
-#tmp[tmp$nodeID=="6344",]
+  format_datetime <- paste(datetime_format(unique(tmp$date)), "%H:%M:%S")
+  start_time <- as.POSIXct(paste(unique(tmp$date), start_time), format = format_datetime) #time of start tour
+  express_time <- as.POSIXct(paste(unique(tmp$date), express_time), format = format_datetime) #latest time for express deliveries
+  max_tour_time_express <- difftime(express_time, start_time, units = "mins")
+  
+  # distance matrix
+  if (dist_calculation_method=="googleAPI") dmat <- distance_matrix(tmp=tmp, pdmat=pdmat, method="googleAPI", symmetric=T, fun="min", weight_priority=weight_priority)
+  if (dist_calculation_method=="euclidean") dmat <- distance_matrix(tmp=tmp, pdmat=pdmat, method="euclidean", weight_priority=weight_priority)
 
-#pal <- colorFactor(topo.colors(100), domain = factor(tmp$hubID))
-#leaflet(data=tmp) %>% #plot all delivery points for a given day
-#  addMarkers(lng=hub_centers$lon, lat=hub_centers$lat, popup = "Hub") %>%
-#  addProviderTiles("Stamen.TonerLite", options = providerTileOptions(noWrap = TRUE) ) %>%
-#  addCircleMarkers(~lon, ~lat, color=pal(tmp$hubID), stroke = FALSE, fillOpacity = 0.8, radius=5, popup = tmp$nodeID) 
+  # hierarchical clustering
+  hc <- hclust(as.dist(dmat), method="complete")
+  
+  # hub assignment
+  if (hub=="Y") {
+    tmp$hubID <- tmp_cut <- cutree(hc, k=n_hubs) #cutree(hc, h=hub_cut)
+    hub_centers <- merge(aggregate(lat ~ hubID, data = tmp, FUN = mean), aggregate(lon ~ hubID, data = tmp, FUN = mean))
+    hubs <- map_hub_to_node(tmp, hub_centers)
+    start_tour <- hubs
+  } else {
+    tmp$hubID <- 1
+    tmp_cut <- rep(1, nrow(tmp))
+    start_tour <- depot
+  }
+  
+  # tour assignment
+  tmp$tourID <- NA
+  tour_schedule <- data.frame()
+  tour_stats <- data.frame()
+  while (any(is.na(tmp$tourID))) {
+    tour <- tour_assignment(tmp_cut, tmp, pdmat, max_weight, max_tour_length, max_tour_time, max_tour_time_express, start_tour, avg_speed, hub, dist_calculation_method, tour_stats, tour_schedule)
+    tmp$tourID <- tour$assignment
+    tour_schedule <- tour$schedule
+    tour_stats <- tour$stats
+    #print(max(tmp_cut))
+    if (max(tmp_cut)<nrow(tmp)) tmp_cut <- cutree(hc, k=max(tmp_cut)+1) else break
+  }
+  
+  # tour merging
+  if (nrow(tour_stats)>1) {
+    merged <- tour_merge(tour_stats, tour_schedule, tmp, max_weight, max_tour_time, max_tour_time_express, max_tour_length, hub, start_tour, depot, dist_calculation_method, pdmat, avg_speed)
+    while (!is.null(merged)) {
+      tour_stats <- merged$stats
+      tour_schedule <- merged$schedule
+      tmp$tourID <- merged$assignment
+      merged <- tour_merge(tour_stats, tour_schedule, tmp, max_weight, max_tour_time, max_tour_time_express, max_tour_length, hub, start_tour, depot, dist_calculation_method, pdmat, avg_speed)
+    }
+  }
+  
+  # add lat lon to tour_schedule
+  tour_schedule <- merge(tour_schedule, rbind(tmp[,c("nodeID", "lat", "lon", "postcode")], depot), by="nodeID") #CHECK how to include lat/lon of depot in truck solution!
+  tour_schedule <- tour_schedule[order(tour_schedule$hubID, tour_schedule$tourID, tour_schedule$tourSEQ),]
+  tour_schedule$date <- tour_stats$date <- unique(tmp$date)
+  
+  # vehicle assignment
+  tour_stats <- tour_stats[order(tour_stats$hubID, -tour_stats$tour_n_express),]
+  if (hub=="N") tour_stats$hubID <- 1
+  tour_stats$vehicleID <- vehicle_assignment(tours=tour_stats, start_time, express_time, max_tour_time)
+  #vehicle_stats report
+  vehicle_stats <- merge(
+    aggregate(cbind("tot_weight"=tour_tot_weight, "tot_time"=tour_tot_time, "tot_ndel"=tour_ndeliveries)~vehicleID+hubID, data=tour_stats, FUN=sum),
+    aggregate(cbind("avg_weight"=tour_tot_weight, "avg_time"=tour_tot_time, "avg_ndel"=tour_ndeliveries, "avg_loading"=tour_tot_weight/max_weight)~vehicleID+hubID, data=tour_stats, FUN=mean)
+    )
+  vehicle_stats$weight_capacity <- max_weight
+  vehicle_stats$date <- unique(tmp$date)
+  
+  # hub trips
+  if (hub=="Y") {
+    hubs$date <- unique(tmp$date)
+    
+    # compute hub refill trips and respective travel distance and time from depot
+    hubs$trips <- aggregate(tourID ~ hubID, data=tmp, FUN= function(x) {return(ceiling(length(unique(x))/max_nboxes_hub))})[,2]
+    hubs$depot_dist <- sapply(hubs$postcode, FUN= function(x){pdmat[depot$postcode , x] + pdmat[x , depot$postcode]}) #meters
+    hubs$tot_travel_dist <- hubs$depot_dist*hubs$trips #meters
+    hubs$tot_travel_time <- hubs$tot_travel_dist/750 #minutes (750 is the avg truck speed in meters/min --CHECK!)
+    hubs <- merge(hubs, aggregate(cbind("nvehicles"=vehicleID)~hubID, data=vehicle_stats, FUN=max))
+    RESULTS[["day_hub"]] <- hubs
+  }
+  
+  tour_stats <- tour_stats[order(tour_stats$tourID),]
+  RESULTS[["day_tour_schedule"]] <- tour_schedule
+  RESULTS[["day_tour_stats"]] <- tour_stats
+  RESULTS[["day_vehicle_stats"]] <- vehicle_stats
+  
+  return(RESULTS)
+}
 
-#%>%
-#  addPolylines(data=results_bikes[results_bikes$tourID==i,], lat = ~lat, lng = ~lon, weight=2, color = "red") 
+
 
 
